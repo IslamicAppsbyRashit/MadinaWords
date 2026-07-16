@@ -2,8 +2,8 @@
    app.js — UI главного экрана, учебная сессия, модалки, настройки.
    Логика SRS-сессии портирована из example/medinah-flashcards.html.
    ========================================================================= */
-import { APP, saveApp, resetProgress } from "./storage.js";
-import { CARDS, LESSONS, ALL_IDS, arabicHTML } from "./data.js";
+import { APP, saveApp, resetProgress, onPersistError, onSyncError, onSynced, SETTINGS_MARK } from "./storage.js";
+import { CARDS, BOOKS, ALL_IDS, arabicHTML } from "./data.js";
 import { rate, scoreOf, isSeen, isLearned, isReview, isWeak } from "./progress.js";
 import { haptic, backButton, tgApplyThemeColors, tgColorScheme } from "./telegram.js";
 
@@ -35,33 +35,67 @@ function renderHome() {
   $("reviewSub").textContent = rv ? "Слова, которые нужно повторить" : "Всё повторено — отлично";
   $("reviewBtn").disabled = rv === 0;
 
-  const grid = $("lessonGrid");
-  grid.innerHTML = "";
-  for (const L of LESSONS) {
-    const ids = L.cards.map((c) => c.id);
-    const learned = ids.filter(isLearned).length;
-    const attention = ids.filter((id) => isSeen(id) && !isLearned(id)).length; // 0 или 1 балл
-    const newC = ids.filter((id) => !isSeen(id)).length;
-    const pct = Math.round((learned / ids.length) * 100);
-    const line2 = newC ? `${newC} новых` : attention ? `${attention} на повтор` : "пройден";
+  // подзаголовок бренда: один том → его название, несколько → «Мединский курс»
+  $("brandEyebrow").textContent = BOOKS.length > 1 ? "Мединский курс" : (BOOKS[0]?.title || "Мединский курс");
 
-    const el = document.createElement("button");
-    el.className = "lesson";
-    el.innerHTML = `
-      ${attention ? `<span class="due-dot"><i></i>${attention}</span>` : ``}
+  renderBooks();
+}
+
+const multiBook = () => BOOKS.length > 1;
+
+/** Метка урока для сессии (с названием книги, если книг несколько). */
+function lessonLabel(book, L) {
+  return multiBook() ? `${book.title} · Урок ${L.n}` : "Урок " + L.n;
+}
+
+function renderBooks() {
+  const container = $("booksContainer");
+  container.innerHTML = "";
+  BOOKS.forEach((book, bi) => {
+    const head = document.createElement("div");
+    head.className = "section-head";
+    const title = multiBook() ? book.title : "Уроки";
+    const right = bi === 0
+      ? `<span class="hint">Нажми, чтобы учить</span>`
+      : multiBook() && book.titleAr ? `<span class="hint ar">${book.titleAr}</span>` : "";
+    head.innerHTML = `<h2>${title}</h2>${right}`;
+    container.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "lessons";
+    for (const L of book.lessons) grid.appendChild(makeLessonCard(book, L));
+    container.appendChild(grid);
+  });
+}
+
+function makeLessonCard(book, L) {
+  const ids = L.cards.map((c) => c.id);
+  const learned = ids.filter(isLearned).length;
+  const attention = ids.filter((id) => isSeen(id) && !isLearned(id)).length; // 0 или 1 балл
+  const newC = ids.filter((id) => !isSeen(id)).length;
+  const pct = Math.round((learned / ids.length) * 100);
+  const line2 = newC ? `${newC} новых` : attention ? `${attention} на повтор` : "пройден";
+
+  // Контейнер + две отдельные кнопки: основная (учить) и «список».
+  // Так нет вложенных интерактивных элементов и обе доступны с клавиатуры.
+  const el = document.createElement("div");
+  el.className = "lesson";
+  el.innerHTML = `
+    <button class="lesson-study" aria-label="Учить: ${lessonLabel(book, L)}, ${L.count} слов, изучено ${learned}">
+      ${attention ? `<span class="due-dot" aria-hidden="true"><i></i>${attention}</span>` : ``}
       <div class="num">Урок ${L.n}</div>
       <div class="ttl">${L.count} слов</div>
       <div class="ring-row">
-        <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
+        <div class="ring" style="--p:${pct}" aria-hidden="true"><b>${pct}%</b></div>
         <div class="meta"><span class="seen">${learned}/${L.count}</span> изучено<br>${line2}</div>
       </div>
-      <span class="list-btn" data-list="${L.n}">список</span>`;
-    el.addEventListener("click", (e) => {
-      if (e.target.dataset.list) { openList(L.n); return; }
-      startSession(buildLessonQueue(L), "Урок " + L.n);
-    });
-    grid.appendChild(el);
-  }
+    </button>
+    <button class="list-btn" aria-label="Список слов урока ${L.n}">список</button>`;
+  el.querySelector(".lesson-study").addEventListener("click", () =>
+    startSession(buildLessonQueue(L), lessonLabel(book, L))
+  );
+  el.querySelector(".list-btn").addEventListener("click", () => openList(book, L));
+  return el;
 }
 
 function buildLessonQueue(L) {
@@ -73,9 +107,11 @@ function buildLessonQueue(L) {
 
 /* ---------- STUDY SESSION ---------- */
 let SESSION = null;
+let focusReturn = null; // куда вернуть фокус после закрытия оверлея/модалки
 
 function startSession(queue, label) {
   if (!queue.length) return;
+  focusReturn = document.activeElement;
   SESSION = {
     queue, idx: 0, label, total: queue.length, done: 0, flipped: false,
     recap: { nw: 0, rev: 0, again: 0 },
@@ -83,10 +119,13 @@ function startSession(queue, label) {
   $("studyLabel").textContent = label;
   $("doneScreen").classList.add("hidden");
   $("studyMain").classList.remove("hidden");
-  $("study").classList.add("show");
+  const study = $("study");
+  study.classList.add("show");
+  study.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
   backButton.show(closeStudy);
   showCard();
+  $("revealBtn").focus(); // фокус в оверлей — сразу можно действовать с клавиатуры
 }
 
 const curId = () => SESSION.queue[SESSION.idx];
@@ -179,15 +218,18 @@ function finishSession() {
 }
 
 function closeStudy() {
-  $("study").classList.remove("show");
+  const study = $("study");
+  study.classList.remove("show");
+  study.setAttribute("aria-hidden", "true");
   document.body.style.overflow = "";
   SESSION = null;
   backButton.hide();
   renderHome();
+  focusReturn?.focus?.();
 }
 
 /* ---------- WORD LIST ---------- */
-let listLesson = null;
+let listCtx = null; // {book, L}
 
 function strengthBadge(id) {
   const s = scoreOf(id);
@@ -197,10 +239,9 @@ function strengthBadge(id) {
   return `<span class="wl-badge s4"><i></i>изучено</span>`;
 }
 
-function openList(n) {
-  listLesson = n;
-  const L = LESSONS.find((x) => x.n === n);
-  $("listTitle").textContent = "Урок " + n + " · " + L.count + " слов";
+function openList(book, L) {
+  listCtx = { book, L };
+  $("listTitle").textContent = lessonLabel(book, L) + " · " + L.count + " слов";
   const body = $("listBody");
   body.innerHTML = "";
   for (const c of L.cards) {
@@ -215,15 +256,19 @@ function openList(n) {
 
 /* ---------- MODALS / SETTINGS ---------- */
 function openModal(id) {
+  focusReturn = document.activeElement;
   $(id).classList.add("show");
   document.body.style.overflow = "hidden";
   backButton.show(() => closeModal(id));
+  // фокус на первую кнопку внутри модалки
+  $(id).querySelector(".modal button")?.focus?.();
 }
 function closeModal(id) {
   $(id).classList.remove("show");
   const studyOpen = $("study").classList.contains("show");
   if (!studyOpen) { document.body.style.overflow = ""; backButton.hide(); }
   else backButton.show(closeStudy);
+  focusReturn?.focus?.();
 }
 
 export function applyTheme() {
@@ -231,13 +276,52 @@ export function applyTheme() {
   tgApplyThemeColors(APP.settings.theme);
 }
 function syncSettingsUI() {
-  document.querySelectorAll("#dirSeg button").forEach((b) => b.classList.toggle("active", b.dataset.dir === APP.settings.dir));
-  document.querySelectorAll("#numSeg button").forEach((b) => b.classList.toggle("active", b.dataset.num === APP.settings.number));
-  document.querySelectorAll("#themeSeg button").forEach((b) => b.classList.toggle("active", b.dataset.theme === APP.settings.theme));
+  const set = (sel, key) =>
+    document.querySelectorAll(sel).forEach((b) => {
+      const on = b.dataset[key] === APP.settings[key === "num" ? "number" : key === "dir" ? "dir" : "theme"];
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  set("#dirSeg button", "dir");
+  set("#numSeg button", "num");
+  set("#themeSeg button", "theme");
+}
+
+/** Показать пользователю, что прогресс не сохраняется (ошибка/повреждение хранилища). */
+function showPersistBanner(state) {
+  if ($("persistBanner")) return;
+  const el = document.createElement("div");
+  el.id = "persistBanner";
+  el.className = "persist-banner";
+  el.setAttribute("role", "alert");
+  el.textContent = state.loadWasCorrupt
+    ? "Не удалось прочитать сохранённый прогресс — он не будет перезаписан. Сбросить можно в настройках."
+    : "Прогресс не сохраняется: хранилище недоступно. Изменения пропадут после закрытия приложения.";
+  document.body.appendChild(el);
+}
+
+/** Баннер о проблеме синхронизации с сервером (прогресс при этом сохраняется локально). */
+function showSyncBanner(kind) {
+  const existing = $("syncBanner");
+  if (!kind) { existing?.remove(); return; }
+  if (existing) return;
+  const el = document.createElement("div");
+  el.id = "syncBanner";
+  el.className = "persist-banner sync";
+  el.setAttribute("role", "alert");
+  el.textContent = kind === "auth"
+    ? "Облачная синхронизация недоступна — переоткройте приложение. Прогресс сохраняется локально."
+    : "Часть данных не удалось синхронизировать с сервером.";
+  document.body.appendChild(el);
 }
 
 /* ---------- WIRE UP ---------- */
 export function wireUp() {
+  onPersistError(showPersistBanner);
+  onSyncError(showSyncBanner);
+  // после прихода серверного состояния — обновить тему и главный экран
+  onSynced(() => { applyTheme(); renderHome(); });
+
   $("reviewBtn").addEventListener("click", () => {
     const rv = shuffle(toReviewIds());
     if (rv.length) startSession(rv, "Повторение");
@@ -262,13 +346,13 @@ export function wireUp() {
   );
 
   $("dirSeg").addEventListener("click", (e) => {
-    if (e.target.dataset.dir) { APP.settings.dir = e.target.dataset.dir; saveApp(); syncSettingsUI(); }
+    if (e.target.dataset.dir) { APP.settings.dir = e.target.dataset.dir; saveApp(SETTINGS_MARK); syncSettingsUI(); }
   });
   $("numSeg").addEventListener("click", (e) => {
-    if (e.target.dataset.num) { APP.settings.number = e.target.dataset.num; saveApp(); syncSettingsUI(); }
+    if (e.target.dataset.num) { APP.settings.number = e.target.dataset.num; saveApp(SETTINGS_MARK); syncSettingsUI(); }
   });
   $("themeSeg").addEventListener("click", (e) => {
-    if (e.target.dataset.theme) { APP.settings.theme = e.target.dataset.theme; APP.settings._themeTouched = true; saveApp(); applyTheme(); syncSettingsUI(); }
+    if (e.target.dataset.theme) { APP.settings.theme = e.target.dataset.theme; APP.settings._themeTouched = true; saveApp(SETTINGS_MARK); applyTheme(); syncSettingsUI(); }
   });
   $("resetBtn").addEventListener("click", () => {
     if (confirm("Сбросить весь прогресс повторений? Это нельзя отменить.")) {
@@ -278,9 +362,16 @@ export function wireUp() {
     }
   });
   $("listStudy").addEventListener("click", () => {
-    const L = LESSONS.find((x) => x.n === listLesson);
+    if (!listCtx) return;
     closeModal("listModal");
-    startSession(buildLessonQueue(L), "Урок " + listLesson);
+    startSession(buildLessonQueue(listCtx.L), lessonLabel(listCtx.book, listCtx.L));
+  });
+
+  // Escape закрывает открытую модалку
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const openM = document.querySelector(".modal-bg.show");
+    if (openM) { e.preventDefault(); closeModal(openM.id); }
   });
 
   // клавиатура (десктопный Telegram / браузер)

@@ -7,6 +7,10 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true, // доступ с телефона по локальной сети для теста в Telegram
+    proxy: {
+      // в разработке API проксируется на бэкенд (в проде — тот же домен)
+      "/api": { target: "http://localhost:3000", changeOrigin: true },
+    },
   },
   build: {
     outDir: "dist",

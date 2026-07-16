@@ -1,0 +1,10 @@
+{
+  "books": [
+    {
+      "id": 1,
+      "title": "Том 1",
+      "titleAr": "اَلْمُعْجَم",
+      "file": "slovar_medinа_tom1.md"
+    }
+  ]
+}

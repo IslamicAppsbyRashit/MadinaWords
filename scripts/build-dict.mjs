@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * build-dict.mjs — превращает словарь мединского курса (.md) в cards.json.
+ * build-dict.mjs — собирает cards.json из нескольких книг словаря.
  *
- * Формат словаря: несколько таблиц на урок. Поддерживаются два вида шапки:
+ * Источник книг — dictionary/manifest.json:
+ *   { "books": [ { "id":1, "title":"Том 1", "titleAr":"…", "file":"…​.md" }, … ] }
+ * Чтобы добавить книгу — положи новый .md в dictionary/ и допиши запись в manifest.
+ *
+ * Формат таблиц в каждом .md (может быть несколько таблиц на урок):
  *   3 колонки: | Перевод | Единственное число            | Множественное число |
  *   4 колонки: | Перевод | Ед. число (м.р.) | Ед. число (ж.р.) | Множественное число |
  *
- * Особенности, которые учитываем:
- *   - Урок 11 отсутствует — нумерация уроков не сплошная.
- *   - Пустое множественное число обозначено «—» → arPlural = null.
- *   - Множественное может содержать варианты «سُرُرٌ / أَسِرَّةٌ» — сохраняем строкой.
- *   - Стабильные id: L{урок}-{порядковый номер внутри урока}. При дополнении
- *     словаря старые id не должны меняться → прогресс SRS не сбивается.
+ * Особенности: пропуски уроков (нумерация не сплошная), «—» = нет формы,
+ * варианты «سُرُرٌ / أَسِرَّةٌ» сохраняются строкой.
+ *
+ * Стабильные id: b{книга}-l{урок}-{n}. При дополнении словаря НОВЫЕ слова
+ * добавляй в КОНЕЦ урока — тогда id ранее выученных слов не сдвигаются и
+ * прогресс не сбивается.
  *
  * Запуск:  node scripts/build-dict.mjs
  */
@@ -21,113 +25,109 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const SRC = resolve(ROOT, "dictionary/slovar_medinа_tom1.md");
+const DICT_DIR = resolve(ROOT, "dictionary");
+const MANIFEST = resolve(DICT_DIR, "manifest.json");
 const OUT = resolve(ROOT, "web/public/cards.json");
 
 const EMPTY = new Set(["—", "-", "–", "", "—/—"]);
-
-/** Нормализация ячейки: обрезаем пробелы; «—» → null. */
-function cell(raw) {
+const cell = (raw) => {
   const v = (raw ?? "").trim();
   return EMPTY.has(v) ? null : v;
-}
-
-/** Разбор строки таблицы `| a | b | c |` → ["a","b","c"] (без крайних пустых). */
+};
 function splitRow(line) {
   const parts = line.split("|");
-  // строки вида "| a | b |" дают ["", " a ", " b ", ""] — отбрасываем края
   if (parts.length && parts[0].trim() === "") parts.shift();
   if (parts.length && parts[parts.length - 1].trim() === "") parts.pop();
   return parts.map((p) => p.trim());
 }
-
 const isSeparator = (line) => /^\|?\s*:?-{2,}/.test(line.trim());
 const isTableRow = (line) => line.trim().startsWith("|");
 const isHeader = (cells) => cells[0] && /перевод/i.test(cells[0]);
 
-function main() {
-  const md = readFileSync(SRC, "utf8");
+/** Разобрать одну книгу → {cards:[...], lessons:[{n,count}]}. */
+function parseBook(bookId, filePath) {
+  const md = readFileSync(filePath, "utf8");
   const lines = md.split(/\r?\n/);
-
   const cards = [];
-  const lessonCounts = new Map(); // n -> count
-  let lesson = null;
-  let layout = null; // {ru, sing, fem, plur} индексы колонок
-  let inTable = false;
+  const lessonCounts = new Map();
+  let lesson = null, layout = null, inTable = false;
 
   for (const line of lines) {
-    const lessonMatch = line.match(/^##\s*Урок\s+(\d+)/i);
-    if (lessonMatch) {
-      lesson = Number(lessonMatch[1]);
+    const lm = line.match(/^##\s*Урок\s+(\d+)/i);
+    if (lm) {
+      lesson = Number(lm[1]);
       if (!lessonCounts.has(lesson)) lessonCounts.set(lesson, 0);
-      inTable = false;
-      layout = null;
+      inTable = false; layout = null;
       continue;
     }
-
-    if (!isTableRow(line)) {
-      inTable = false; // пустая строка / текст / блок-цитата завершает таблицу
-      continue;
-    }
-    if (isSeparator(line)) continue; // строка `|---|---|`
+    if (!isTableRow(line)) { inTable = false; continue; }
+    if (isSeparator(line)) continue;
 
     const cells = splitRow(line);
-
     if (isHeader(cells)) {
-      // определяем раскладку колонок по количеству ячеек
-      if (cells.length >= 4) {
-        layout = { ru: 0, sing: 1, fem: 2, plur: 3 }; // м.р. / ж.р. / мн.ч.
-      } else {
-        layout = { ru: 0, sing: 1, fem: null, plur: 2 };
-      }
+      layout = cells.length >= 4
+        ? { ru: 0, sing: 1, fem: 2, plur: 3 }
+        : { ru: 0, sing: 1, fem: null, plur: 2 };
       inTable = true;
       continue;
     }
-
     if (!inTable || lesson == null || !layout) continue;
 
     const ru = cell(cells[layout.ru]);
     const ar = cell(cells[layout.sing]);
-    if (!ru || !ar) continue; // без перевода или арабского слова карточку не делаем
+    if (!ru || !ar) continue;
 
     const idx = lessonCounts.get(lesson) + 1;
     lessonCounts.set(lesson, idx);
 
     const card = {
-      id: `L${lesson}-${idx}`,
+      id: `b${bookId}-l${lesson}-${idx}`,
+      book: bookId,
       lesson,
       ru,
       ar,
       arPlural: layout.plur != null ? cell(cells[layout.plur]) : null,
     };
     const fem = layout.fem != null ? cell(cells[layout.fem]) : null;
-    if (fem) card.arFem = fem; // добавляем только когда есть (цвета, урок 22)
-
+    if (fem) card.arFem = fem;
     cards.push(card);
   }
 
   const lessons = [...lessonCounts.entries()]
-    .filter(([, count]) => count > 0)
+    .filter(([, c]) => c > 0)
     .sort((a, b) => a[0] - b[0])
     .map(([n, count]) => ({ n, count }));
+  return { cards, lessons };
+}
+
+function main() {
+  const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
+  const allCards = [];
+  const books = [];
+
+  for (const b of manifest.books) {
+    const { cards, lessons } = parseBook(b.id, resolve(DICT_DIR, b.file));
+    allCards.push(...cards);
+    books.push({ id: b.id, title: b.title, titleAr: b.titleAr ?? null, totalCards: cards.length, lessons });
+    console.log(`  книга ${b.id} «${b.title}»: ${cards.length} карточек, ${lessons.length} уроков`);
+  }
 
   const out = {
     generatedAt: new Date().toISOString(),
-    source: "slovar_medinа_tom1.md",
-    volume: 1,
-    totalCards: cards.length,
-    lessons,
-    cards,
+    books,
+    totalCards: allCards.length,
+    cards: allCards,
   };
 
   mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, JSON.stringify(out, null, 2) + "\n", "utf8");
 
-  console.log(`✓ cards.json: ${cards.length} карточек, ${lessons.length} уроков`);
-  console.log(`  уроки: ${lessons.map((l) => `${l.n}(${l.count})`).join(", ")}`);
-  const withFem = cards.filter((c) => c.arFem).length;
-  const withPlural = cards.filter((c) => c.arPlural).length;
-  console.log(`  с мн.числом: ${withPlural} · с формой ж.р.: ${withFem}`);
+  // проверка уникальности id
+  const ids = new Set();
+  const dup = allCards.filter((c) => (ids.has(c.id) ? true : (ids.add(c.id), false)));
+  if (dup.length) throw new Error("Дубликаты id: " + dup.slice(0, 5).map((c) => c.id).join(", "));
+
+  console.log(`✓ cards.json: ${allCards.length} карточек, ${books.length} книг(а), id уникальны`);
   console.log(`  → ${OUT}`);
 }
 

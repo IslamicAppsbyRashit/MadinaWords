@@ -18,8 +18,8 @@ export function isLearned(id) { return scoreOf(id) === 2; } // изучено
 export function isReview(id) { return scoreOf(id) === 1; }  // к повтору
 export function isWeak(id) { return scoreOf(id) === 0; }    // слабых
 
-/** Поставить оценку g ∈ {0,1,2} — записывает балл и сохраняет. */
+/** Поставить оценку g ∈ {0,1,2} — записывает балл и сохраняет (+ помечает для синка). */
 export function rate(id, g) {
   APP.cards[id] = { score: g };
-  saveApp();
+  saveApp(id);
 }

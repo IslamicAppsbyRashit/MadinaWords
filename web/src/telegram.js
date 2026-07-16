@@ -69,7 +69,10 @@ export const backButton = {
       tg.BackButton.offClick?.(this._h);
       this._h = onBack;
       tg.BackButton.onClick(onBack);
-    } catch {}
+    } catch (e) {
+      // это навигация, а не косметика — молча ломать нельзя
+      console.warn("[tg] BackButton.show", e);
+    }
   },
   hide() {
     if (!tg?.BackButton) return;
@@ -77,7 +80,9 @@ export const backButton = {
       if (this._h) tg.BackButton.offClick?.(this._h);
       this._h = null;
       tg.BackButton.hide();
-    } catch {}
+    } catch (e) {
+      console.warn("[tg] BackButton.hide", e);
+    }
   },
   _h: null,
 };

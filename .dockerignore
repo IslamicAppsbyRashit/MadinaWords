@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+web/public/cards.json
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.env
+**/.env
+.git
+.gitignore
+.claude
+design-system
+example
+*.log
+.DS_Store
+**/.DS_Store

@@ -1,0 +1,36 @@
+# Конфиг деплоя на Fly.io. Имя приложения задаётся при `fly launch`.
+# Секрет BOT_TOKEN НЕ здесь — он ставится через `fly secrets set` (см. DEPLOY.md).
+
+app = "madinawords"          # заменится на выбранное при launch
+primary_region = "fra"       # ближайший регион: fra (Франкфурт) / waw (Варшава)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  HOST = "0.0.0.0"
+  # DB_PATH задан в Dockerfile (/data/madinawords.db) и лежит на постоянном томе ниже
+
+# Постоянный том для SQLite — иначе прогресс стирался бы при перезапуске
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"   # спит при простое → экономит бесплатный лимит
+  auto_start_machines = true    # просыпается на первый запрос (холодный старт ~пара секунд)
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "3s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"              # хватает для крошечного приложения; при OOM поднять до 512mb

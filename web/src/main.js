@@ -5,7 +5,7 @@
 import "./styles.css";
 import { initTelegram } from "./telegram.js";
 import { loadCards } from "./data.js";
-import { loadApp } from "./storage.js";
+import { loadApp, syncPull } from "./storage.js";
 import { wireUp, renderHome, applyInitialTheme } from "./app.js";
 
 async function boot() {
@@ -23,6 +23,10 @@ async function boot() {
   applyInitialTheme();
   wireUp();
   renderHome();
+
+  // Синхронизация с сервером — в фоне, не блокирует показ UI (offline-first).
+  // syncPull сам обновит экран через onSynced, когда придёт серверное состояние.
+  syncPull();
 }
 
 boot();
